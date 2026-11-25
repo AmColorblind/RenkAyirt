@@ -125,8 +125,9 @@ jobs:
           public final class Detector {
 
               public static final int WHITE = 1, YELLOW = 2, ORANGE = 3, SALMON = 4, DKRED = 5, PINK = 6,
-                      PURPLE = 7, BLUE = 8, CYAN = 9, DKGREEN = 10, GREEN = 11, LIME = 12;
-              public static final int NCLS = 12;
+                      PURPLE = 7, BLUE = 8, CYAN = 9, DKGREEN = 10, GREEN = 11, LIME = 12,
+                      TEAL = 13, DKCYAN = 14, AZURE = 15, MAGENTA = 16;
+              public static final int NCLS = 16;
 
               public static final class Item {
                   public final float x, y, w, h;
@@ -179,6 +180,11 @@ jobs:
                   if (hue >= 170 && hue <= 200 && s >= 0.33f && v >= 0.9f) return CYAN;
                   if (hue >= 222 && hue <= 245 && s >= 0.65f) return BLUE;
                   if (hue >= 250 && hue <= 282 && s >= 0.5f) return PURPLE;
+                  // oyunda su an gorunmeyen ama olasi yeni renkler (renk cemberindeki bosluklar)
+                  if (hue >= 151 && hue <= 169 && s >= 0.45f) return TEAL;
+                  if (hue >= 170 && hue <= 200 && s >= 0.6f && v < 0.9f) return DKCYAN;
+                  if (hue >= 201 && hue <= 221 && s >= 0.5f && v >= 0.78f) return AZURE;
+                  if (hue >= 283 && hue <= 334 && s >= 0.5f) return MAGENTA;
                   return 0;
               }
 
@@ -468,10 +474,12 @@ jobs:
           final class SymbolPainter {
 
               static final String[] NAMES = {"", "Beyaz", "Sarı", "Turuncu", "Somon (açık kırmızı)", "Koyu kırmızı",
-                      "Pembe", "Mor", "Mavi", "Açık mavi", "Koyu yeşil", "Yeşil", "Açık yeşil (lime)"};
-              static final String[] LETTERS = {"", "B", "S", "T", "O", "K", "P", "M", "V", "A", "D", "Y", "L"};
+                      "Pembe", "Mor", "Mavi", "Açık mavi", "Koyu yeşil", "Yeşil", "Açık yeşil (lime)",
+                      "Turkuaz", "Petrol mavisi", "Gök mavisi", "Fuşya (magenta)"};
+              static final String[] LETTERS = {"", "B", "S", "T", "O", "K", "P", "M", "V", "A", "D", "Y", "L", "Z", "H", "G", "F"};
               static final String[] SHAPE_NAMES = {"", "halka", "yıldız", "baklava", "kalp", "çarpı", "aşağı üçgen",
-                      "artı", "dolu kare", "boş kare", "dolu daire", "yukarı üçgen", "iki çizgi"};
+                      "artı", "dolu kare", "boş kare", "dolu daire", "yukarı üçgen", "iki çizgi",
+                      "altıgen", "hedef", "sağ üçgen", "yarım daire"};
 
               private static final int FILL = 0xFFE6E6E6;
               private static final int EDGE = 0xFF000000;
@@ -557,12 +565,45 @@ jobs:
                           PATH.close();
                           fill(c, h, p);
                           break;
-                      default:
+                      case 12:
                           PATH.moveTo(cx - r * 0.8f, cy - r * 0.38f);
                           PATH.lineTo(cx + r * 0.8f, cy - r * 0.38f);
                           PATH.moveTo(cx - r * 0.8f, cy + r * 0.38f);
                           PATH.lineTo(cx + r * 0.8f, cy + r * 0.38f);
                           stroke(c, r * 0.4f, h, p);
+                          break;
+                      case 13:
+                          for (int i = 0; i < 6; i++) {
+                              double a = i * Math.PI / 3;
+                              float x = cx + (float) Math.cos(a) * r * 0.95f;
+                              float y = cy + (float) Math.sin(a) * r * 0.95f;
+                              if (i == 0) PATH.moveTo(x, y); else PATH.lineTo(x, y);
+                          }
+                          PATH.close();
+                          fill(c, h, p);
+                          break;
+                      case 14:
+                          PATH.addCircle(cx, cy, r * 0.78f, Path.Direction.CW);
+                          stroke(c, r * 0.26f, h, p);
+                          PATH.reset();
+                          PATH.addCircle(cx, cy, r * 0.3f, Path.Direction.CW);
+                          fill(c, h, p);
+                          break;
+                      case 15:
+                          PATH.moveTo(cx - r * 0.7f, cy - r * 0.85f);
+                          PATH.lineTo(cx + r * 0.9f, cy);
+                          PATH.lineTo(cx - r * 0.7f, cy + r * 0.85f);
+                          PATH.close();
+                          fill(c, h, p);
+                          break;
+                      case 16:
+                          PATH.moveTo(cx, cy - r * 0.85f);
+                          PATH.arcTo(cx - r * 0.85f, cy - r * 0.85f, cx + r * 0.85f, cy + r * 0.85f, -90f, 180f, false);
+                          PATH.close();
+                          fill(c, h, p);
+                          break;
+                      default:
+                          text(c, String.valueOf(cls), cx, cy, r, h, p);
                           break;
                   }
               }
@@ -683,6 +724,7 @@ jobs:
           import android.os.Handler;
           import android.os.HandlerThread;
           import android.os.IBinder;
+          import android.os.Process;
           import android.os.SystemClock;
           import android.util.DisplayMetrics;
           import android.view.Gravity;
@@ -692,6 +734,8 @@ jobs:
           import android.widget.Toast;
 
           import java.nio.ByteBuffer;
+          import java.nio.ByteOrder;
+          import java.nio.IntBuffer;
           import java.util.Collections;
           import java.util.List;
 
@@ -718,6 +762,10 @@ jobs:
               private int realW;
               private int realH;
               private int[] pixels;
+              private int[] rowBuf;
+              private int lastHash;
+              private volatile boolean hasHash;
+              private volatile int emptyStreak;
               private long lastProc;
               private boolean destroyed;
               private volatile boolean symbolsOn = true;
@@ -745,7 +793,7 @@ jobs:
                           return START_NOT_STICKY;
                       }
                       prefs = getSharedPreferences("ayar", Context.MODE_PRIVATE);
-                      thread = new HandlerThread("renkayirt-yakala");
+                      thread = new HandlerThread("renkayirt-yakala", Process.THREAD_PRIORITY_BACKGROUND);
                       thread.start();
                       bg = new Handler(thread.getLooper());
 
@@ -770,6 +818,7 @@ jobs:
                       capW = CAP_W;
                       capH = Math.max(100, Math.round(realH * (float) CAP_W / realW));
                       pixels = new int[capW * capH];
+                      rowBuf = new int[capW];
                       detector = new Detector(capW, capH);
 
                       addOverlay();
@@ -854,6 +903,8 @@ jobs:
 
               void toggle() {
                   symbolsOn = !symbolsOn;
+                  hasHash = false;
+                  emptyStreak = 0;
                   if (!symbolsOn) {
                       discsA = new float[0];
                       discsB = new float[0];
@@ -874,7 +925,8 @@ jobs:
                       img = r.acquireLatestImage();
                       if (img == null) return;
                       int speed = prefs.getInt("hiz", 1);
-                      long gap = speed == 0 ? 200 : (speed == 1 ? 125 : 100);
+                      long gap = speed == 0 ? 250 : (speed == 1 ? 165 : 100);
+                      if (emptyStreak > 4) gap *= 3; // oyun ekrani degilse seyrek tara (isinmayi azaltir)
                       long now = SystemClock.uptimeMillis();
                       if (now - lastProc < gap) return;
                       lastProc = now;
@@ -882,19 +934,24 @@ jobs:
 
                       Image.Plane plane = img.getPlanes()[0];
                       ByteBuffer buf = plane.getBuffer();
-                      int rowStride = plane.getRowStride();
-                      int pixStride = plane.getPixelStride();
+                      buf.order(ByteOrder.nativeOrder());
+                      IntBuffer ib = buf.asIntBuffer();
+                      int rowInts = plane.getRowStride() / 4;
+                      int hash = 17;
                       for (int y = 0; y < capH; y++) {
-                          int row = y * rowStride;
+                          ib.position(y * rowInts);
+                          ib.get(rowBuf, 0, capW);
                           int o = y * capW;
                           for (int x = 0; x < capW; x++) {
-                              int p = row + x * pixStride;
-                              pixels[o + x] = 0xFF000000
-                                      | ((buf.get(p) & 0xFF) << 16)
-                                      | ((buf.get(p + 1) & 0xFF) << 8)
-                                      | (buf.get(p + 2) & 0xFF);
+                              int v = rowBuf[x]; // bellekte R,G,B,A sirasi: int olarak A B G R
+                              int px = 0xFF000000 | (v & 0xFF00) | ((v & 0xFF) << 16) | ((v >> 16) & 0xFF);
+                              pixels[o + x] = px;
+                              hash = hash * 31 + px;
                           }
                       }
+                      if (hasHash && hash == lastHash) return; // ekran ayni, bos yere tarama yapma
+                      lastHash = hash;
+                      hasHash = true;
 
                       float[] a = discsA;
                       float[] b = discsB;
@@ -904,6 +961,7 @@ jobs:
                       detector.setSymbolDiscs(all, all.length / 3);
 
                       List<Detector.Item> items = detector.detect(pixels);
+                      if (items.isEmpty()) emptyStreak++; else emptyStreak = 0;
                       int style = prefs.getInt("stil", 0);
                       float sf = prefs.getInt("boyut", 100) / 100f;
                       float[] nd = new float[items.size() * 3];
@@ -1183,7 +1241,7 @@ jobs:
 
                   label(root, "Yenileme hızı", 18, true);
                   RadioGroup speeds = new RadioGroup(this);
-                  String[] speedNames = {"Yavaş (pil dostu)", "Orta", "Hızlı"};
+                  String[] speedNames = {"Yavaş (serin, 4/sn)", "Orta (6/sn)", "Hızlı (10/sn, ısıtır)"};
                   int curSpeed = prefs.getInt("hiz", 1);
                   for (int i = 0; i < speedNames.length; i++) {
                       RadioButton rb = new RadioButton(this);
@@ -1253,14 +1311,14 @@ jobs:
 
                   @Override
                   protected void onMeasure(int wSpec, int hSpec) {
-                      setMeasuredDimension(View.MeasureSpec.getSize(wSpec), rowH * 12);
+                      setMeasuredDimension(View.MeasureSpec.getSize(wSpec), rowH * Detector.NCLS);
                   }
 
                   @Override
                   protected void onDraw(Canvas c) {
                       SharedPreferences pr = getContext().getSharedPreferences("ayar", Context.MODE_PRIVATE);
                       int st = pr.getInt("stil", 0);
-                      for (int k = 1; k <= 12; k++) {
+                      for (int k = 1; k <= Detector.NCLS; k++) {
                           float cy = (k - 1) * rowH + rowH / 2f;
                           float cx = rowH * 0.6f;
                           c.drawCircle(cx, cy, rowH * 0.44f, bgPaint);
