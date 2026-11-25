@@ -1,0 +1,1290 @@
+name: RenkAyirt APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Proje dosyalarini olustur
+        run: |
+          cat > settings.gradle <<'EOF_1'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "RenkAyirt"
+          include ':app'
+          EOF_1
+          cat > build.gradle <<'EOF_2'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF_2
+          cat > gradle.properties <<'EOF_3'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          EOF_3
+          mkdir -p app
+          cat > app/build.gradle <<'EOF_4'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.renkayirt.oyun'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.renkayirt.oyun'
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              options.encoding = 'UTF-8'
+          }
+          EOF_4
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_5'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="RenkAyırt Oyun"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".CaptureService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+              </application>
+          </manifest>
+          EOF_5
+          mkdir -p app/src/main/java/com/renkayirt/oyun
+          cat > app/src/main/java/com/renkayirt/oyun/Detector.java <<'EOF_6'
+          package com.renkayirt.oyun;
+
+          import java.util.ArrayList;
+          import java.util.Arrays;
+          import java.util.Collections;
+          import java.util.Comparator;
+          import java.util.List;
+
+          /**
+           * Oyun ekranindaki renkli kare, blok ve toplari bulur. Android'e bagimli degildir.
+           * Girdi: kucultulmus ekran goruntusu (ARGB). Cikti: sembol konulacak yerler.
+           */
+          public final class Detector {
+
+              public static final int WHITE = 1, YELLOW = 2, ORANGE = 3, SALMON = 4, DKRED = 5, PINK = 6,
+                      PURPLE = 7, BLUE = 8, CYAN = 9, DKGREEN = 10, GREEN = 11, LIME = 12;
+              public static final int NCLS = 12;
+
+              public static final class Item {
+                  public final float x, y, w, h;
+                  public final int cls;
+                  public final boolean ball;
+                  Item(float x, float y, float w, float h, int cls, boolean ball) {
+                      this.x = x; this.y = y; this.w = w; this.h = h; this.cls = cls; this.ball = ball;
+                  }
+              }
+
+              private static final float ROI_TOP = 0.29f;
+              private static final int[][] OFFS = {{1, 0}, {2, 0}, {3, 0}, {0, 1}, {0, 2}, {0, 3}, {1, 1}, {2, 2}, {-1, 1}, {-2, 2}};
+
+              private final int w, h;
+              private final byte[] cls;
+              private final byte[] safe;
+              private final int[] parent;
+              private final int[] minX, maxX, minY, maxY, area;
+              private final int[] roots;
+
+              private float[] discs = new float[0];
+              private int nDisc = 0;
+
+              /** Ekranda cizili sembol dairelerini (x, y, yaricap; kucuk olcekte) bildirir. */
+              public void setSymbolDiscs(float[] d, int n) { discs = d; nDisc = n; }
+
+              /** Bir ogenin ustune cizilecek sembolun yaricapi (kucuk olcekte). */
+              public static float symbolRadius(Item it, float sizeFactor) {
+                  return Math.min(it.w, it.h) * 0.5f * 0.55f * sizeFactor;
+              }
+
+              public Detector(int w, int h) {
+                  this.w = w; this.h = h;
+                  int n = w * h;
+                  cls = new byte[n]; safe = new byte[n]; parent = new int[n];
+                  minX = new int[n]; maxX = new int[n]; minY = new int[n]; maxY = new int[n]; area = new int[n];
+                  roots = new int[n];
+              }
+
+              static byte classify(float hue, float s, float v, float luma) {
+                  if (v < 0.33f) return 0;
+                  if ((s < 0.12f && v >= 0.93f) || (s < 0.25f && v >= 0.95f && hue >= 170 && hue <= 215)) return WHITE;
+                  if (s >= 0.12f && s < 0.45f && hue >= 280 && hue <= 315 && v >= 0.90f) return PINK;
+                  if (s < 0.32f) return 0;
+                  if ((hue >= 335 || hue <= 12) && s >= 0.5f) return (byte) (luma >= 0.435f ? SALMON : DKRED);
+                  if (hue >= 13 && hue <= 43 && s >= 0.6f) return ORANGE;
+                  if (hue >= 44 && hue <= 68 && s >= 0.5f) return YELLOW;
+                  if (hue >= 69 && hue <= 100 && s >= 0.5f) return LIME;
+                  if (hue >= 101 && hue <= 150 && s >= 0.45f) return (byte) (v < 0.62f ? DKGREEN : GREEN);
+                  if (hue >= 170 && hue <= 200 && s >= 0.33f && v >= 0.9f) return CYAN;
+                  if (hue >= 222 && hue <= 245 && s >= 0.65f) return BLUE;
+                  if (hue >= 250 && hue <= 282 && s >= 0.5f) return PURPLE;
+                  return 0;
+              }
+
+              private int find(int a) {
+                  while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; }
+                  return a;
+              }
+
+              private void union(int a, int b) {
+                  int ra = find(a), rb = find(b);
+                  if (ra == rb) return;
+                  if (ra < rb) parent[rb] = ra; else parent[ra] = rb;
+              }
+
+              /** lab dizisindeki ayni etiketli pikselleri (2 piksellik bosluklari atlayarak) birlestirir. */
+              private int label(byte[] lab, int y0) {
+                  Arrays.fill(parent, -1);
+                  for (int y = y0; y < h; y++) {
+                      int row = y * w;
+                      for (int x = 0; x < w; x++) { int i = row + x; if (lab[i] != 0) parent[i] = i; }
+                  }
+                  for (int y = y0; y < h; y++) {
+                      int row = y * w;
+                      for (int x = 0; x < w; x++) {
+                          int i = row + x;
+                          if (parent[i] < 0) continue;
+                          for (int[] o : OFFS) {
+                              int nx = x + o[0], ny = y + o[1];
+                              if (nx < 0 || nx >= w || ny >= h) continue;
+                              int j = ny * w + nx;
+                              if (parent[j] >= 0 && lab[j] == lab[i]) union(i, j);
+                          }
+                      }
+                  }
+                  int nr = 0;
+                  for (int y = y0; y < h; y++) {
+                      int row = y * w;
+                      for (int x = 0; x < w; x++) {
+                          int i = row + x;
+                          if (parent[i] < 0) continue;
+                          int r = find(i);
+                          if (r == i) {
+                              roots[nr++] = r;
+                              minX[r] = x; maxX[r] = x; minY[r] = y; maxY[r] = y; area[r] = 0;
+                          }
+                      }
+                  }
+                  for (int y = y0; y < h; y++) {
+                      int row = y * w;
+                      for (int x = 0; x < w; x++) {
+                          int i = row + x;
+                          if (parent[i] < 0) continue;
+                          int r = find(i);
+                          if (x < minX[r]) minX[r] = x;
+                          if (x > maxX[r]) maxX[r] = x;
+                          if (y < minY[r]) minY[r] = y;
+                          if (y > maxY[r]) maxY[r] = y;
+                          area[r]++;
+                      }
+                  }
+                  return nr;
+              }
+
+              private static final class Cand {
+                  float x, y, w, h, r; int cls; boolean ball; int area;
+              }
+
+              /** Sembol konulacak yerleri dondurur. Oyun tahtasi gorunmuyorsa bos liste doner. */
+              public List<Item> detect(int[] px) {
+                  List<Item> out = new ArrayList<Item>();
+                  int y0 = (int) (ROI_TOP * h);
+                  Arrays.fill(cls, (byte) 0);
+                  Arrays.fill(safe, (byte) 0);
+                  int dark = 0, total = 0;
+                  for (int y = y0; y < h; y++) {
+                      for (int x = 0; x < w; x++) {
+                          int i = y * w + x;
+                          int c = px[i];
+                          int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+                          int mx = Math.max(r, Math.max(g, b)), mn = Math.min(r, Math.min(g, b));
+                          float v = mx / 255f;
+                          float s = mx == 0 ? 0f : (mx - mn) / (float) mx;
+                          float hue = 0f;
+                          if (mx != mn) {
+                              float d = mx - mn;
+                              if (mx == r) hue = 60f * (((g - b) / d) % 6f);
+                              else if (mx == g) hue = 60f * ((b - r) / d + 2f);
+                              else hue = 60f * ((r - g) / d + 4f);
+                              if (hue < 0) hue += 360f;
+                          }
+                          total++;
+                          if (v > 0.2f && v < 0.5f && s < 0.25f) dark++;
+                          float luma = (0.299f * r + 0.587f * g + 0.114f * b) / 255f;
+                          cls[i] = classify(hue, s, v, luma);
+                          if (hue >= 190 && hue <= 215 && s >= 0.12f && s <= 0.32f && v >= 0.85f) safe[i] = 1;
+                      }
+                  }
+                  if (total == 0 || dark < 0.25f * total) return out;
+
+                  // Kendi cizdigimiz semboller yakalanan goruntuye girer: dairenin icini cevresindeki renkle doldur
+                  for (int di = 0; di < nDisc; di++) {
+                      float cx = discs[di * 3], cy = discs[di * 3 + 1], dr = discs[di * 3 + 2];
+                      int[] cnt = new int[NCLS + 1];
+                      int inb = 0;
+                      for (int a = 0; a < 16; a++) {
+                          double ang = a * Math.PI / 8.0;
+                          int sx = Math.round(cx + (float) Math.cos(ang) * dr * 1.5f);
+                          int sy = Math.round(cy + (float) Math.sin(ang) * dr * 1.5f);
+                          if (sx < 0 || sx >= w || sy < y0 || sy >= h) continue;
+                          inb++;
+                          cnt[cls[sy * w + sx]]++;
+                      }
+                      int best = 0, bc = 0;
+                      for (int k = 1; k <= NCLS; k++) if (cnt[k] > bc) { bc = cnt[k]; best = k; }
+                      byte fillCls = (inb > 0 && bc * 2 >= inb) ? (byte) best : 0;
+                      float mr = dr * 1.3f;
+                      int x0 = Math.max(0, (int) (cx - mr) - 1), x1 = Math.min(w - 1, (int) (cx + mr) + 1);
+                      int yy0 = Math.max(y0, (int) (cy - mr) - 1), yy1 = Math.min(h - 1, (int) (cy + mr) + 1);
+                      for (int yy = yy0; yy <= yy1; yy++)
+                          for (int xx = x0; xx <= x1; xx++) {
+                              float ddx = xx - cx, ddy = yy - cy;
+                              if (ddx * ddx + ddy * ddy <= mr * mr) cls[yy * w + xx] = fillCls;
+                          }
+                  }
+
+                  // kasa gibi buyuk soluk mavi bolgeleri disarida birak
+                  int ns = label(safe, y0);
+                  List<int[]> zones = new ArrayList<int[]>();
+                  for (int k = 0; k < ns; k++) {
+                      int r = roots[k];
+                      if (area[r] > 2200) zones.add(new int[]{minX[r] - 2, minY[r] - 2, maxX[r] + 2, maxY[r] + 2});
+                  }
+
+                  int nr = label(cls, y0);
+                  List<Cand> units = new ArrayList<Cand>();
+                  List<Cand> balls = new ArrayList<Cand>();
+                  for (int k = 0; k < nr; k++) {
+                      int r = roots[k];
+                      int bw = maxX[r] - minX[r] + 1, bh = maxY[r] - minY[r] + 1;
+                      int a = area[r];
+                      if (a < 40) continue;
+                      int k0 = cls[r];
+                      boolean touchesBottom = maxY[r] >= h - 1;
+                      float fill = a / (float) (bw * bh);
+                      boolean unit = bw >= 20 && bh >= 22 && bw <= 3.2f * bh && fill >= 0.45f && bw <= 140 && bh <= 140;
+                      boolean slice = !unit && touchesBottom && bw >= 40 && bw <= 80 && bh >= 8 && fill >= 0.5f;
+                      if (unit || slice) {
+                          int nCols, nRows;
+                          if (bw >= 52 && bw <= 74) { nCols = 1; nRows = Math.max(1, Math.round(bh / 28.5f)); }
+                          else { nCols = Math.max(1, Math.round(bw / 42f)); nRows = Math.max(1, Math.round(bh / 41f)); }
+                          float cw = bw / (float) nCols, ch = bh / (float) nRows;
+                          for (int cy = 0; cy < nRows; cy++) {
+                              for (int cx = 0; cx < nCols; cx++) {
+                                  float rx0 = minX[r] + cx * cw, ry0 = minY[r] + cy * ch;
+                                  int ix0 = (int) (rx0 + cw * 0.25f), ix1 = (int) (rx0 + cw * 0.75f);
+                                  int iy0 = (int) (ry0 + ch * 0.25f), iy1 = (int) (ry0 + ch * 0.75f);
+                                  int cnt = 0, tot = 0;
+                                  for (int yy = iy0; yy <= iy1 && yy < h; yy++) {
+                                      for (int xx = ix0; xx <= ix1 && xx < w; xx++) {
+                                          tot++;
+                                          int j = yy * w + xx;
+                                          if (parent[j] >= 0 && find(j) == r) cnt++;
+                                      }
+                                  }
+                                  if (tot == 0 || cnt < 0.35f * tot) continue;
+                                  Cand c = new Cand();
+                                  c.x = rx0 + cw / 2f; c.y = ry0 + ch / 2f; c.w = cw; c.h = ch; c.cls = k0; c.area = a / (nCols * nRows);
+                                  c.r = Math.min(cw, ch) / 2f; c.ball = false;
+                                  units.add(c);
+                              }
+                          }
+                          continue;
+                      }
+                      if (bh > 150 || bw > 400) continue;
+                      ballPeaks(r, k0, bw, bh, balls);
+                  }
+
+                  // buyuk parcalar once: ic ice gelen kucuk parcalari at
+                  Collections.sort(units, new Comparator<Cand>() {
+                      public int compare(Cand a, Cand b) { return Integer.compare(b.area, a.area); }
+                  });
+                  List<Cand> acc = new ArrayList<Cand>();
+                  for (Cand c : units) {
+                      if (inZone(zones, c.x, c.y)) continue;
+                      boolean ok = true;
+                      for (Cand a : acc) {
+                          if (a.cls != c.cls && Math.abs(c.x - a.x) <= a.w / 2f + 1.5f && Math.abs(c.y - a.y) <= a.h / 2f + 1.5f) { ok = false; break; }
+                          if (a.cls == c.cls && Math.abs(c.x - a.x) < a.w * 0.4f && Math.abs(c.y - a.y) < a.h * 0.4f) { ok = false; break; }
+                      }
+                      if (ok) acc.add(c);
+                  }
+                  Collections.sort(balls, new Comparator<Cand>() {
+                      public int compare(Cand a, Cand b) { return Float.compare(b.r, a.r); }
+                  });
+                  List<Cand> accBalls = new ArrayList<Cand>();
+                  for (Cand c : balls) {
+                      if (inZone(zones, c.x, c.y)) continue;
+                      boolean ok = true;
+                      for (Cand a : acc) {
+                          if (Math.abs(c.x - a.x) <= a.w / 2f + 1.5f && Math.abs(c.y - a.y) <= a.h / 2f + 1.5f) { ok = false; break; }
+                      }
+                      if (!ok) continue;
+                      for (Cand a : accBalls) {
+                          float d = (float) Math.hypot(c.x - a.x, c.y - a.y);
+                          if (a.cls == c.cls) { if (d < 1.5f * Math.max(a.r, c.r)) { ok = false; break; } }
+                          else if (d < 0.9f * a.r) { ok = false; break; }
+                      }
+                      if (ok) accBalls.add(c);
+                  }
+                  for (Cand c : acc) out.add(new Item(c.x, c.y, c.w, c.h, c.cls, false));
+                  for (Cand c : accBalls) out.add(new Item(c.x, c.y, c.r * 2f, c.r * 2f, c.cls, true));
+                  return out;
+              }
+
+              private static boolean inZone(List<int[]> zones, float x, float y) {
+                  for (int[] z : zones) if (x >= z[0] && x <= z[2] && y >= z[1] && y <= z[3]) return true;
+                  return false;
+              }
+
+              /** Kucuk parcalarda (toplar) uzaklik donusumu ile her topun merkezini bulur. */
+              private void ballPeaks(int root, int k0, int bw, int bh, List<Cand> outList) {
+                  int pw = bw + 2, ph = bh + 2;
+                  int[] d = new int[pw * ph];
+                  int big = 1 << 20;
+                  for (int yy = 0; yy < bh; yy++) {
+                      for (int xx = 0; xx < bw; xx++) {
+                          int j = (minY[root] + yy) * w + (minX[root] + xx);
+                          d[(yy + 1) * pw + (xx + 1)] = (parent[j] >= 0 && find(j) == root) ? big : 0;
+                      }
+                  }
+                  for (int y = 1; y <= bh; y++) {
+                      for (int x = 1; x <= bw; x++) {
+                          int i = y * pw + x;
+                          if (d[i] == 0) continue;
+                          int m = d[i];
+                          m = Math.min(m, d[i - 1] + 3);
+                          m = Math.min(m, d[i - pw] + 3);
+                          m = Math.min(m, d[i - pw - 1] + 4);
+                          m = Math.min(m, d[i - pw + 1] + 4);
+                          d[i] = m;
+                      }
+                  }
+                  for (int y = bh; y >= 1; y--) {
+                      for (int x = bw; x >= 1; x--) {
+                          int i = y * pw + x;
+                          if (d[i] == 0) continue;
+                          int m = d[i];
+                          m = Math.min(m, d[i + 1] + 3);
+                          m = Math.min(m, d[i + pw] + 3);
+                          m = Math.min(m, d[i + pw + 1] + 4);
+                          m = Math.min(m, d[i + pw - 1] + 4);
+                          d[i] = m;
+                      }
+                  }
+                  int dmax = 0;
+                  for (int v : d) if (v > dmax) dmax = v;
+                  float rmax = dmax / 3f;
+                  if (rmax < 5.5f || rmax > 26f) return;
+                  for (int y = 1; y <= bh; y++) {
+                      for (int x = 1; x <= bw; x++) {
+                          int i = y * pw + x;
+                          int v = d[i];
+                          if (v < 5.5f * 3) continue;
+                          boolean peak = true;
+                          for (int dy = -1; dy <= 1 && peak; dy++)
+                              for (int dx = -1; dx <= 1; dx++)
+                                  if (d[i + dy * pw + dx] > v) { peak = false; break; }
+                          if (!peak) continue;
+                          Cand c = new Cand();
+                          c.x = minX[root] + x - 1; c.y = minY[root] + y - 1; c.r = v / 3f; c.w = c.r * 2f; c.h = c.r * 2f;
+                          c.cls = k0; c.ball = true; c.area = 0;
+                          outList.add(c);
+                      }
+                  }
+              }
+          }
+          EOF_6
+          mkdir -p app/src/main/java/com/renkayirt/oyun
+          cat > app/src/main/java/com/renkayirt/oyun/SymbolPainter.java <<'EOF_7'
+          package com.renkayirt.oyun;
+
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.graphics.Path;
+
+          /** Renk siniflari icin sekil, harf veya sayi cizer. Hem yuzey hem liste ekrani kullanir. */
+          final class SymbolPainter {
+
+              static final String[] NAMES = {"", "Beyaz", "Sarı", "Turuncu", "Somon (açık kırmızı)", "Koyu kırmızı",
+                      "Pembe", "Mor", "Mavi", "Açık mavi", "Koyu yeşil", "Yeşil", "Açık yeşil (lime)"};
+              static final String[] LETTERS = {"", "B", "S", "T", "O", "K", "P", "M", "V", "A", "D", "Y", "L"};
+              static final String[] SHAPE_NAMES = {"", "halka", "yıldız", "baklava", "kalp", "çarpı", "aşağı üçgen",
+                      "artı", "dolu kare", "boş kare", "dolu daire", "yukarı üçgen", "iki çizgi"};
+
+              private static final int FILL = 0xFFE6E6E6;
+              private static final int EDGE = 0xFF000000;
+              private static final Path PATH = new Path();
+
+              private SymbolPainter() { }
+
+              static void draw(Canvas c, int cls, int style, float cx, float cy, float r, Paint p) {
+                  float h = r * 0.16f;
+                  if (style == 1 || style == 2) {
+                      text(c, style == 1 ? LETTERS[cls] : String.valueOf(cls), cx, cy, r, h, p);
+                      return;
+                  }
+                  PATH.reset();
+                  switch (cls) {
+                      case 1:
+                          PATH.addCircle(cx, cy, r * 0.72f, Path.Direction.CW);
+                          stroke(c, r * 0.32f, h, p);
+                          break;
+                      case 2:
+                          for (int i = 0; i < 10; i++) {
+                              double a = -Math.PI / 2 + i * Math.PI / 5;
+                              float rad = (i % 2 == 0) ? r : r * 0.45f;
+                              float x = cx + (float) Math.cos(a) * rad;
+                              float y = cy + (float) Math.sin(a) * rad;
+                              if (i == 0) PATH.moveTo(x, y); else PATH.lineTo(x, y);
+                          }
+                          PATH.close();
+                          fill(c, h, p);
+                          break;
+                      case 3:
+                          PATH.moveTo(cx, cy - r);
+                          PATH.lineTo(cx + r * 0.8f, cy);
+                          PATH.lineTo(cx, cy + r);
+                          PATH.lineTo(cx - r * 0.8f, cy);
+                          PATH.close();
+                          fill(c, h, p);
+                          break;
+                      case 4:
+                          PATH.moveTo(cx, cy + r * 0.95f);
+                          PATH.cubicTo(cx - r * 1.3f, cy + r * 0.05f, cx - r * 0.95f, cy - r * 0.95f, cx, cy - r * 0.35f);
+                          PATH.cubicTo(cx + r * 0.95f, cy - r * 0.95f, cx + r * 1.3f, cy + r * 0.05f, cx, cy + r * 0.95f);
+                          PATH.close();
+                          fill(c, h, p);
+                          break;
+                      case 5:
+                          PATH.moveTo(cx - r * 0.62f, cy - r * 0.62f);
+                          PATH.lineTo(cx + r * 0.62f, cy + r * 0.62f);
+                          PATH.moveTo(cx + r * 0.62f, cy - r * 0.62f);
+                          PATH.lineTo(cx - r * 0.62f, cy + r * 0.62f);
+                          stroke(c, r * 0.36f, h, p);
+                          break;
+                      case 6:
+                          PATH.moveTo(cx - r * 0.85f, cy - r * 0.72f);
+                          PATH.lineTo(cx + r * 0.85f, cy - r * 0.72f);
+                          PATH.lineTo(cx, cy + r * 0.85f);
+                          PATH.close();
+                          fill(c, h, p);
+                          break;
+                      case 7:
+                          PATH.moveTo(cx - r * 0.8f, cy);
+                          PATH.lineTo(cx + r * 0.8f, cy);
+                          PATH.moveTo(cx, cy - r * 0.8f);
+                          PATH.lineTo(cx, cy + r * 0.8f);
+                          stroke(c, r * 0.36f, h, p);
+                          break;
+                      case 8:
+                          PATH.addRect(cx - r * 0.72f, cy - r * 0.72f, cx + r * 0.72f, cy + r * 0.72f, Path.Direction.CW);
+                          fill(c, h, p);
+                          break;
+                      case 9:
+                          PATH.addRect(cx - r * 0.66f, cy - r * 0.66f, cx + r * 0.66f, cy + r * 0.66f, Path.Direction.CW);
+                          stroke(c, r * 0.3f, h, p);
+                          break;
+                      case 10:
+                          PATH.addCircle(cx, cy, r * 0.82f, Path.Direction.CW);
+                          fill(c, h, p);
+                          break;
+                      case 11:
+                          PATH.moveTo(cx, cy - r * 0.85f);
+                          PATH.lineTo(cx + r * 0.85f, cy + r * 0.72f);
+                          PATH.lineTo(cx - r * 0.85f, cy + r * 0.72f);
+                          PATH.close();
+                          fill(c, h, p);
+                          break;
+                      default:
+                          PATH.moveTo(cx - r * 0.8f, cy - r * 0.38f);
+                          PATH.lineTo(cx + r * 0.8f, cy - r * 0.38f);
+                          PATH.moveTo(cx - r * 0.8f, cy + r * 0.38f);
+                          PATH.lineTo(cx + r * 0.8f, cy + r * 0.38f);
+                          stroke(c, r * 0.4f, h, p);
+                          break;
+                  }
+              }
+
+              private static void stroke(Canvas c, float w, float h, Paint p) {
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeCap(Paint.Cap.ROUND);
+                  p.setStrokeJoin(Paint.Join.ROUND);
+                  p.setColor(EDGE);
+                  p.setStrokeWidth(w + 2 * h);
+                  c.drawPath(PATH, p);
+                  p.setColor(FILL);
+                  p.setStrokeWidth(w);
+                  c.drawPath(PATH, p);
+              }
+
+              private static void fill(Canvas c, float h, Paint p) {
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeCap(Paint.Cap.ROUND);
+                  p.setStrokeJoin(Paint.Join.ROUND);
+                  p.setColor(EDGE);
+                  p.setStrokeWidth(h * 2);
+                  c.drawPath(PATH, p);
+                  p.setStyle(Paint.Style.FILL);
+                  p.setColor(FILL);
+                  c.drawPath(PATH, p);
+              }
+
+              private static void text(Canvas c, String s, float cx, float cy, float r, float h, Paint p) {
+                  p.setTextAlign(Paint.Align.CENTER);
+                  p.setFakeBoldText(true);
+                  p.setTextSize(r * (s.length() > 1 ? 1.45f : 1.9f));
+                  float y = cy - (p.descent() + p.ascent()) / 2f;
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeJoin(Paint.Join.ROUND);
+                  p.setStrokeWidth(h * 2.2f);
+                  p.setColor(EDGE);
+                  c.drawText(s, cx, y, p);
+                  p.setStyle(Paint.Style.FILL);
+                  p.setColor(FILL);
+                  c.drawText(s, cx, y, p);
+                  p.setFakeBoldText(false);
+              }
+          }
+          EOF_7
+          mkdir -p app/src/main/java/com/renkayirt/oyun
+          cat > app/src/main/java/com/renkayirt/oyun/OverlayView.java <<'EOF_8'
+          package com.renkayirt.oyun;
+
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.view.View;
+
+          import java.util.Collections;
+          import java.util.List;
+
+          /** Ekranin tamamini kaplayan, dokunmaya kapali, sadece sembol ciziyen katman. */
+          final class OverlayView extends View {
+
+              private volatile List<Detector.Item> items = Collections.emptyList();
+              private volatile int capW = 1;
+              private volatile int capH = 1;
+              private volatile int style = 0;
+              private volatile float sizeF = 1f;
+              private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+              OverlayView(Context context) {
+                  super(context);
+              }
+
+              void update(List<Detector.Item> list, int cw, int ch, int st, float sf) {
+                  items = list;
+                  capW = cw;
+                  capH = ch;
+                  style = st;
+                  sizeF = sf;
+                  postInvalidate();
+              }
+
+              @Override
+              protected void onDraw(Canvas canvas) {
+                  List<Detector.Item> list = items;
+                  if (list.isEmpty()) return;
+                  float sx = getWidth() / (float) capW;
+                  float sy = getHeight() / (float) capH;
+                  for (Detector.Item it : list) {
+                      float r = Detector.symbolRadius(it, sizeF) * sx;
+                      if (r < 6f) continue;
+                      SymbolPainter.draw(canvas, it.cls, style, it.x * sx, it.y * sy, r, paint);
+                  }
+              }
+          }
+          EOF_8
+          mkdir -p app/src/main/java/com/renkayirt/oyun
+          cat > app/src/main/java/com/renkayirt/oyun/CaptureService.java <<'EOF_9'
+          package com.renkayirt.oyun;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.ServiceInfo;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.graphics.PixelFormat;
+          import android.hardware.display.DisplayManager;
+          import android.hardware.display.VirtualDisplay;
+          import android.media.Image;
+          import android.media.ImageReader;
+          import android.media.projection.MediaProjection;
+          import android.media.projection.MediaProjectionManager;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.HandlerThread;
+          import android.os.IBinder;
+          import android.os.SystemClock;
+          import android.util.DisplayMetrics;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.Toast;
+
+          import java.nio.ByteBuffer;
+          import java.util.Collections;
+          import java.util.List;
+
+          /** Ekrani kucuk boyutta yakalar, renkleri bulur, ust katmana semboller cizer. */
+          public class CaptureService extends Service {
+
+              static final String ACTION_STOP = "com.renkayirt.oyun.STOP";
+              private static final String CHANNEL = "renkayirt";
+              private static final int CAP_W = 360;
+
+              private MediaProjection projection;
+              private VirtualDisplay virtualDisplay;
+              private ImageReader reader;
+              private HandlerThread thread;
+              private Handler bg;
+              private WindowManager wm;
+              private OverlayView overlay;
+              private FloatButton button;
+              private WindowManager.LayoutParams buttonParams;
+              private Detector detector;
+              private SharedPreferences prefs;
+              private int capW;
+              private int capH;
+              private int realW;
+              private int realH;
+              private int[] pixels;
+              private long lastProc;
+              private boolean destroyed;
+              private volatile boolean symbolsOn = true;
+              private volatile float[] discsA = new float[0];
+              private volatile float[] discsB = new float[0];
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  if (intent == null || projection != null) return START_NOT_STICKY;
+                  try {
+                      startForegroundNow();
+                      int code = intent.getIntExtra("code", 0);
+                      Intent data = readData(intent);
+                      if (data == null) {
+                          stopSelf();
+                          return START_NOT_STICKY;
+                      }
+                      prefs = getSharedPreferences("ayar", Context.MODE_PRIVATE);
+                      thread = new HandlerThread("renkayirt-yakala");
+                      thread.start();
+                      bg = new Handler(thread.getLooper());
+
+                      MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+                      projection = mpm.getMediaProjection(code, data);
+                      if (projection == null) {
+                          stopSelf();
+                          return START_NOT_STICKY;
+                      }
+                      projection.registerCallback(new MediaProjection.Callback() {
+                          @Override
+                          public void onStop() {
+                              if (!destroyed) stopSelf();
+                          }
+                      }, bg);
+
+                      wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+                      DisplayMetrics dm = new DisplayMetrics();
+                      getRealMetrics(dm);
+                      realW = dm.widthPixels;
+                      realH = dm.heightPixels;
+                      capW = CAP_W;
+                      capH = Math.max(100, Math.round(realH * (float) CAP_W / realW));
+                      pixels = new int[capW * capH];
+                      detector = new Detector(capW, capH);
+
+                      addOverlay();
+                      addButton();
+
+                      reader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
+                      reader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
+                          @Override
+                          public void onImageAvailable(ImageReader r) {
+                              onFrame(r);
+                          }
+                      }, bg);
+                      virtualDisplay = projection.createVirtualDisplay("RenkAyirt", capW, capH, dm.densityDpi,
+                              DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.getSurface(), null, bg);
+                  } catch (Exception e) {
+                      Toast.makeText(this, "Başlatılamadı: " + e.getClass().getSimpleName(), Toast.LENGTH_LONG).show();
+                      stopSelf();
+                  }
+                  return START_NOT_STICKY;
+              }
+
+              @SuppressWarnings("deprecation")
+              private static Intent readData(Intent intent) {
+                  return intent.getParcelableExtra("data");
+              }
+
+              @SuppressWarnings("deprecation")
+              private void getRealMetrics(DisplayMetrics dm) {
+                  wm.getDefaultDisplay().getRealMetrics(dm);
+              }
+
+              private void startForegroundNow() {
+                  NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                  nm.createNotificationChannel(new NotificationChannel(CHANNEL, "RenkAyırt", NotificationManager.IMPORTANCE_LOW));
+                  Intent stop = new Intent(this, CaptureService.class);
+                  stop.setAction(ACTION_STOP);
+                  PendingIntent pi = PendingIntent.getService(this, 0, stop, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  Notification n = new Notification.Builder(this, CHANNEL)
+                          .setContentTitle("RenkAyırt çalışıyor")
+                          .setContentText("Durdurmak için bu bildirime dokun")
+                          .setSmallIcon(android.R.drawable.ic_menu_view)
+                          .setContentIntent(pi)
+                          .build();
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+                  } else {
+                      startForeground(1, n);
+                  }
+              }
+
+              private void addOverlay() {
+                  overlay = new OverlayView(this);
+                  WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                          WindowManager.LayoutParams.MATCH_PARENT,
+                          WindowManager.LayoutParams.MATCH_PARENT,
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                  | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                          PixelFormat.TRANSLUCENT);
+                  lp.gravity = Gravity.TOP | Gravity.START;
+                  lp.alpha = 0.8f;
+                  if (Build.VERSION.SDK_INT >= 28) {
+                      lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                  }
+                  wm.addView(overlay, lp);
+              }
+
+              private void addButton() {
+                  int size = Math.round(52 * getResources().getDisplayMetrics().density);
+                  buttonParams = new WindowManager.LayoutParams(size, size,
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                          PixelFormat.TRANSLUCENT);
+                  buttonParams.gravity = Gravity.TOP | Gravity.START;
+                  buttonParams.x = Math.round(realW * 0.02f);
+                  buttonParams.y = Math.round(realH * 0.20f);
+                  button = new FloatButton(this);
+                  wm.addView(button, buttonParams);
+              }
+
+              void toggle() {
+                  symbolsOn = !symbolsOn;
+                  if (!symbolsOn) {
+                      discsA = new float[0];
+                      discsB = new float[0];
+                      overlay.update(Collections.<Detector.Item>emptyList(), capW, capH, 0, 1f);
+                  }
+                  button.invalidate();
+              }
+
+              void openSettings() {
+                  Intent i = new Intent(this, MainActivity.class);
+                  i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                  startActivity(i);
+              }
+
+              private void onFrame(ImageReader r) {
+                  Image img = null;
+                  try {
+                      img = r.acquireLatestImage();
+                      if (img == null) return;
+                      int speed = prefs.getInt("hiz", 1);
+                      long gap = speed == 0 ? 200 : (speed == 1 ? 125 : 100);
+                      long now = SystemClock.uptimeMillis();
+                      if (now - lastProc < gap) return;
+                      lastProc = now;
+                      if (!symbolsOn) return;
+
+                      Image.Plane plane = img.getPlanes()[0];
+                      ByteBuffer buf = plane.getBuffer();
+                      int rowStride = plane.getRowStride();
+                      int pixStride = plane.getPixelStride();
+                      for (int y = 0; y < capH; y++) {
+                          int row = y * rowStride;
+                          int o = y * capW;
+                          for (int x = 0; x < capW; x++) {
+                              int p = row + x * pixStride;
+                              pixels[o + x] = 0xFF000000
+                                      | ((buf.get(p) & 0xFF) << 16)
+                                      | ((buf.get(p + 1) & 0xFF) << 8)
+                                      | (buf.get(p + 2) & 0xFF);
+                          }
+                      }
+
+                      float[] a = discsA;
+                      float[] b = discsB;
+                      float[] all = new float[a.length + b.length];
+                      System.arraycopy(a, 0, all, 0, a.length);
+                      System.arraycopy(b, 0, all, a.length, b.length);
+                      detector.setSymbolDiscs(all, all.length / 3);
+
+                      List<Detector.Item> items = detector.detect(pixels);
+                      int style = prefs.getInt("stil", 0);
+                      float sf = prefs.getInt("boyut", 100) / 100f;
+                      float[] nd = new float[items.size() * 3];
+                      for (int i = 0; i < items.size(); i++) {
+                          Detector.Item it = items.get(i);
+                          nd[i * 3] = it.x;
+                          nd[i * 3 + 1] = it.y;
+                          nd[i * 3 + 2] = Detector.symbolRadius(it, sf);
+                      }
+                      discsB = discsA;
+                      discsA = nd;
+                      if (symbolsOn) overlay.update(items, capW, capH, style, sf);
+                  } catch (Exception e) {
+                      // tek kare hatasi onemsiz, sonraki kare denenir
+                  } finally {
+                      if (img != null) img.close();
+                  }
+              }
+
+              @Override
+              public void onDestroy() {
+                  destroyed = true;
+                  super.onDestroy();
+                  try {
+                      if (reader != null) reader.setOnImageAvailableListener(null, null);
+                  } catch (Exception e) {
+                      // yoksay
+                  }
+                  if (virtualDisplay != null) {
+                      virtualDisplay.release();
+                      virtualDisplay = null;
+                  }
+                  if (reader != null) {
+                      reader.close();
+                      reader = null;
+                  }
+                  if (projection != null) {
+                      try {
+                          projection.stop();
+                      } catch (Exception e) {
+                          // yoksay
+                      }
+                      projection = null;
+                  }
+                  if (wm != null) {
+                      try {
+                          if (overlay != null) wm.removeView(overlay);
+                      } catch (Exception e) {
+                          // yoksay
+                      }
+                      try {
+                          if (button != null) wm.removeView(button);
+                      } catch (Exception e) {
+                          // yoksay
+                      }
+                  }
+                  if (thread != null) {
+                      thread.quitSafely();
+                      thread = null;
+                  }
+              }
+
+              /** Surukulebilen kucuk ac/kapa dugmesi. Dokun: ac/kapa. Uzun bas: ayarlar. */
+              static final class FloatButton extends View {
+                  private final CaptureService svc;
+                  private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private float downX;
+                  private float downY;
+                  private int startX;
+                  private int startY;
+                  private long downTime;
+                  private boolean dragging;
+
+                  FloatButton(CaptureService s) {
+                      super(s);
+                      svc = s;
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas c) {
+                      float w = getWidth();
+                      float cx = w / 2f;
+                      float r = w / 2f - 3f;
+                      p.setStyle(Paint.Style.FILL);
+                      p.setColor(0xFF202020);
+                      c.drawCircle(cx, cx, r, p);
+                      p.setStyle(Paint.Style.STROKE);
+                      p.setColor(0xFFFFFFFF);
+                      p.setStrokeWidth(svc.symbolsOn ? w * 0.12f : w * 0.04f);
+                      c.drawCircle(cx, cx, r - w * 0.06f, p);
+                      p.setStyle(Paint.Style.FILL);
+                      p.setTextAlign(Paint.Align.CENTER);
+                      p.setFakeBoldText(true);
+                      p.setTextSize(w * 0.3f);
+                      c.drawText(svc.symbolsOn ? "ON" : "OFF", cx, cx - (p.descent() + p.ascent()) / 2f, p);
+                  }
+
+                  @Override
+                  public boolean onTouchEvent(MotionEvent e) {
+                      switch (e.getAction()) {
+                          case MotionEvent.ACTION_DOWN:
+                              downX = e.getRawX();
+                              downY = e.getRawY();
+                              startX = svc.buttonParams.x;
+                              startY = svc.buttonParams.y;
+                              downTime = SystemClock.uptimeMillis();
+                              dragging = false;
+                              return true;
+                          case MotionEvent.ACTION_MOVE: {
+                              float dx = e.getRawX() - downX;
+                              float dy = e.getRawY() - downY;
+                              if (!dragging && Math.hypot(dx, dy) > 20) dragging = true;
+                              if (dragging) {
+                                  svc.buttonParams.x = startX + Math.round(dx);
+                                  svc.buttonParams.y = startY + Math.round(dy);
+                                  svc.wm.updateViewLayout(this, svc.buttonParams);
+                              }
+                              return true;
+                          }
+                          case MotionEvent.ACTION_UP:
+                              if (!dragging) {
+                                  if (SystemClock.uptimeMillis() - downTime > 700) svc.openSettings();
+                                  else svc.toggle();
+                              }
+                              return true;
+                          default:
+                              return true;
+                      }
+                  }
+              }
+          }
+          EOF_9
+          mkdir -p app/src/main/java/com/renkayirt/oyun
+          cat > app/src/main/java/com/renkayirt/oyun/MainActivity.java <<'EOF_10'
+          package com.renkayirt.oyun;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.media.projection.MediaProjectionManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.RadioButton;
+          import android.widget.RadioGroup;
+          import android.widget.ScrollView;
+          import android.widget.SeekBar;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          /** Izinleri verir, servisi baslatir, simge ayarlarini gosterir. */
+          public class MainActivity extends Activity {
+
+              private static final int REQ_CAPTURE = 1;
+              private static final int REQ_NOTIF = 2;
+              private SharedPreferences prefs;
+              private TextView status;
+
+              private int dp(int v) {
+                  return Math.round(v * getResources().getDisplayMetrics().density);
+              }
+
+              private TextView label(LinearLayout parent, String s, int sp, boolean bold) {
+                  TextView t = new TextView(this);
+                  t.setText(s);
+                  t.setTextSize(sp);
+                  t.setTextColor(0xFFFFFFFF);
+                  if (bold) t.setTypeface(t.getTypeface(), android.graphics.Typeface.BOLD);
+                  t.setPadding(0, dp(10), 0, dp(4));
+                  parent.addView(t);
+                  return t;
+              }
+
+              private Button button(LinearLayout parent, String s, View.OnClickListener l) {
+                  Button b = new Button(this);
+                  b.setText(s);
+                  b.setAllCaps(false);
+                  b.setOnClickListener(l);
+                  parent.addView(b);
+                  return b;
+              }
+
+              @Override
+              protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  prefs = getSharedPreferences("ayar", Context.MODE_PRIVATE);
+                  ScrollView sv = new ScrollView(this);
+                  sv.setBackgroundColor(0xFF202124);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(20), dp(24), dp(20), dp(32));
+                  sv.addView(root);
+
+                  label(root, "RenkAyırt Oyun", 26, true);
+                  label(root, "Oyundaki renklerin üstüne küçük şekil, harf veya sayı koyar. "
+                          + "Önce 1. adımı yap, sonra 2. adımla başlat, sonra oyuna geç. "
+                          + "Ekranda çıkan yuvarlak ON/OFF düğmesine dokunarak simgeleri açıp kapatırsın. "
+                          + "Düğmeyi basılı tutarsan bu ekran açılır, sürüklersen yerini değiştirirsin.", 15, false);
+
+                  status = label(root, "", 16, true);
+
+                  button(root, "1. Diğer uygulamaların üstünde gösterme iznini ver", new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
+                      }
+                  });
+                  button(root, "2. Başlat (ekran yakalama izni sorulur, TÜM EKRAN seç)", new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          if (!Settings.canDrawOverlays(MainActivity.this)) {
+                              Toast.makeText(MainActivity.this, "Önce 1. adımdaki izni ver", Toast.LENGTH_LONG).show();
+                              return;
+                          }
+                          MediaProjectionManager m = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+                          startActivityForResult(m.createScreenCaptureIntent(), REQ_CAPTURE);
+                      }
+                  });
+                  button(root, "Durdur", new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          stopService(new Intent(MainActivity.this, CaptureService.class));
+                          Toast.makeText(MainActivity.this, "Durduruldu", Toast.LENGTH_SHORT).show();
+                      }
+                  });
+
+                  label(root, "Simge stili", 18, true);
+                  RadioGroup styles = new RadioGroup(this);
+                  String[] styleNames = {"Şekiller", "Harfler", "Sayılar"};
+                  int curStyle = prefs.getInt("stil", 0);
+                  for (int i = 0; i < styleNames.length; i++) {
+                      RadioButton rb = new RadioButton(this);
+                      rb.setText(styleNames[i]);
+                      rb.setTextColor(0xFFFFFFFF);
+                      rb.setId(100 + i);
+                      styles.addView(rb);
+                      if (i == curStyle) rb.setChecked(true);
+                  }
+                  styles.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener() {
+                      @Override
+                      public void onCheckedChanged(RadioGroup g, int id) {
+                          prefs.edit().putInt("stil", id - 100).apply();
+                      }
+                  });
+                  root.addView(styles);
+
+                  final TextView sizeLabel = label(root, "", 18, true);
+                  SeekBar size = new SeekBar(this);
+                  size.setMax(100);
+                  int curSize = prefs.getInt("boyut", 100);
+                  size.setProgress(curSize - 60);
+                  sizeLabel.setText("Simge boyutu: %" + curSize);
+                  size.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override
+                      public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+                          int v = 60 + progress;
+                          sizeLabel.setText("Simge boyutu: %" + v);
+                          prefs.edit().putInt("boyut", v).apply();
+                      }
+
+                      @Override
+                      public void onStartTrackingTouch(SeekBar s) { }
+
+                      @Override
+                      public void onStopTrackingTouch(SeekBar s) { }
+                  });
+                  root.addView(size);
+
+                  label(root, "Yenileme hızı", 18, true);
+                  RadioGroup speeds = new RadioGroup(this);
+                  String[] speedNames = {"Yavaş (pil dostu)", "Orta", "Hızlı"};
+                  int curSpeed = prefs.getInt("hiz", 1);
+                  for (int i = 0; i < speedNames.length; i++) {
+                      RadioButton rb = new RadioButton(this);
+                      rb.setText(speedNames[i]);
+                      rb.setTextColor(0xFFFFFFFF);
+                      rb.setId(200 + i);
+                      speeds.addView(rb);
+                      if (i == curSpeed) rb.setChecked(true);
+                  }
+                  speeds.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener() {
+                      @Override
+                      public void onCheckedChanged(RadioGroup g, int id) {
+                          prefs.edit().putInt("hiz", id - 200).apply();
+                      }
+                  });
+                  root.addView(speeds);
+
+                  label(root, "Simge listesi", 18, true);
+                  root.addView(new LegendView(this));
+
+                  setContentView(sv);
+
+                  if (Build.VERSION.SDK_INT >= 33
+                          && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
+                  }
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  status.setText(Settings.canDrawOverlays(this)
+                          ? "Üstte gösterme izni: VAR"
+                          : "Üstte gösterme izni: YOK (1. adımı yap)");
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  super.onActivityResult(req, res, data);
+                  if (req != REQ_CAPTURE) return;
+                  if (res == RESULT_OK && data != null) {
+                      Intent s = new Intent(this, CaptureService.class);
+                      s.putExtra("code", res);
+                      s.putExtra("data", data);
+                      startForegroundService(s);
+                      Toast.makeText(this, "Başladı. Oyuna geçip ON/OFF düğmesini kullan.", Toast.LENGTH_LONG).show();
+                      moveTaskToBack(true);
+                  } else {
+                      Toast.makeText(this, "Ekran yakalama izni verilmedi", Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              /** 12 rengin simgesini ve adini listeler. */
+              static final class LegendView extends View {
+                  private final Paint shapePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  private final int rowH;
+
+                  LegendView(Context c) {
+                      super(c);
+                      rowH = Math.round(56 * c.getResources().getDisplayMetrics().density);
+                      textPaint.setColor(0xFFFFFFFF);
+                      textPaint.setTextSize(rowH * 0.32f);
+                      bgPaint.setColor(0xFF7A7A7A);
+                  }
+
+                  @Override
+                  protected void onMeasure(int wSpec, int hSpec) {
+                      setMeasuredDimension(View.MeasureSpec.getSize(wSpec), rowH * 12);
+                  }
+
+                  @Override
+                  protected void onDraw(Canvas c) {
+                      SharedPreferences pr = getContext().getSharedPreferences("ayar", Context.MODE_PRIVATE);
+                      int st = pr.getInt("stil", 0);
+                      for (int k = 1; k <= 12; k++) {
+                          float cy = (k - 1) * rowH + rowH / 2f;
+                          float cx = rowH * 0.6f;
+                          c.drawCircle(cx, cy, rowH * 0.44f, bgPaint);
+                          SymbolPainter.draw(c, k, st, cx, cy, rowH * 0.3f, shapePaint);
+                          String line = SymbolPainter.NAMES[k] + "  (" + SymbolPainter.SHAPE_NAMES[k] + ", "
+                                  + SymbolPainter.LETTERS[k] + ", " + k + ")";
+                          c.drawText(line, rowH * 1.3f, cy - (textPaint.descent() + textPaint.ascent()) / 2f, textPaint);
+                      }
+                  }
+              }
+          }
+          EOF_10
+
+      - name: Android lisanslari
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: APK derle
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RenkAyirt-APK
+          path: app/build/outputs/apk/debug/*.apk
